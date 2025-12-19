@@ -25,13 +25,26 @@ IFS=',' read -r COL1 COL2 COL3 COL4 <<< "${COLORS}"
 # Fetch contributor stats
 log "Fetching contributor stats for ${REPO}..."
 CONTRIBUTOR_DATA=$(fetch_github_data "/repos/${REPO}/stats/contributors")
-if [[ -n "$CONTRIBUTOR_DATA" ]]; then
+
+if [[ -n "$CONTRIBUTOR_DATA" ]] && jq -e 'type=="array"' >/dev/null 2>&1 <<<"$CONTRIBUTOR_DATA"; then
   TOTAL=$(jq length <<< "$CONTRIBUTOR_DATA")
-  INDEX=$(jq -r '.[].author.login' <<< "$CONTRIBUTOR_DATA" | grep -n "^${USER}$" | cut -d: -f1 || true)
-  INDEX=$((INDEX - 1))
-  COMMITS=$(jq ".[$INDEX].total" <<< "$CONTRIBUTOR_DATA")
-  RANK=$((TOTAL - INDEX))
+
+  INDEX=$(jq -r 'map(.author.login) | index("'"${USER}"'")' <<< "$CONTRIBUTOR_DATA")
+
+  if [[ "$INDEX" != "null" ]]; then
+    COMMITS=$(jq ".[$INDEX].total" <<< "$CONTRIBUTOR_DATA")
+    RANK=$((TOTAL - INDEX))
+  else
+    log "  • User not found in contributors"
+    COMMITS=""
+    RANK=""
+  fi
+else
+  log "  • Contributor stats not ready yet"
+  COMMITS=""
+  RANK=""
 fi
+
 
 # Fetch open PR count
 log "Fetching open pull requests for ${USER}..."
