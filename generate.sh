@@ -34,16 +34,16 @@ if [[ -n "$CONTRIBUTOR_DATA" ]] && jq -e 'type=="array"' >/dev/null 2>&1 <<<"$CO
   if [[ "$INDEX" != "null" ]]; then
     COMMITS=$(jq ".[$INDEX].total" <<< "$CONTRIBUTOR_DATA")
     RANK=$((TOTAL - INDEX))
+
+    CONTRIB_READY=true
+    COMMITS_READY=true
   else
-    log "  • GITHUB_USER not found in contributors"
-    COMMITS=""
-    RANK=""
+    log "  • User not found in contributors"
   fi
 else
   log "  • Contributor stats not ready yet"
-  COMMITS=""
-  RANK=""
 fi
+
 
 
 # Fetch open PR count
