@@ -29,13 +29,13 @@ CONTRIBUTOR_DATA=$(fetch_github_data "/repos/${REPO}/stats/contributors")
 if [[ -n "$CONTRIBUTOR_DATA" ]] && jq -e 'type=="array"' >/dev/null 2>&1 <<<"$CONTRIBUTOR_DATA"; then
   TOTAL=$(jq length <<< "$CONTRIBUTOR_DATA")
 
-  INDEX=$(jq -r 'map(.author.login) | index("'"${USER}"'")' <<< "$CONTRIBUTOR_DATA")
+  INDEX=$(jq -r 'map(.author.login) | index("'"${GITHUB_USER}"'")' <<< "$CONTRIBUTOR_DATA")
 
   if [[ "$INDEX" != "null" ]]; then
     COMMITS=$(jq ".[$INDEX].total" <<< "$CONTRIBUTOR_DATA")
     RANK=$((TOTAL - INDEX))
   else
-    log "  • User not found in contributors"
+    log "  • GITHUB_USER not found in contributors"
     COMMITS=""
     RANK=""
   fi
@@ -47,15 +47,15 @@ fi
 
 
 # Fetch open PR count
-log "Fetching open pull requests for ${USER}..."
-PRS_DATA=$(fetch_github_data "/search/issues?q=repo:${REPO}+is:pr+is:open+draft:false+author:${USER}")
+log "Fetching open pull requests for ${GITHUB_USER}..."
+PRS_DATA=$(fetch_github_data "/search/issues?q=repo:${REPO}+is:pr+is:open+draft:false+author:${GITHUB_USER}")
 if [[ -n "$PRS_DATA" ]]; then
   OPEN_PRS=$(jq '.total_count' <<< "$PRS_DATA")
 fi
 
 # Fetch latest commit info
-log "Fetching latest commit for ${USER}..."
-COMMITS_DATA=$(fetch_github_data "/repos/${REPO}/commits?author=${USER}&per_page=1")
+log "Fetching latest commit for ${GITHUB_USER}..."
+COMMITS_DATA=$(fetch_github_data "/repos/${REPO}/commits?author=${GITHUB_USER}&per_page=1")
 
 if [[ -n "$COMMITS_DATA" ]] && jq -e 'type=="array" and length>0' >/dev/null 2>&1 <<<"$COMMITS_DATA"; then
   LAST_COMMIT=$(jq '.[0]' <<< "$COMMITS_DATA")
@@ -76,7 +76,7 @@ if [[ -n "$COMMITS_DATA" ]] && jq -e 'type=="array" and length>0' >/dev/null 2>&
     LAST_SHA=""
   fi
 else
-  log "  • No commits found for user"
+  log "  • No commits found for GITHUB_USER"
   COMBINED_ESC=""
   LAST_SHA=""
 fi
@@ -96,7 +96,7 @@ cat > docs/latest-commit.html <<EOF
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Latest commit for ${USER}</title>
+  <title>Latest commit for ${GITHUB_USER}</title>
   <meta http-equiv="refresh" content="0;url=https://github.com/${REPO}/commit/${LAST_SHA}">
   <link rel="canonical" href="https://github.com/${REPO}/commit/${LAST_SHA}">
 </head>
