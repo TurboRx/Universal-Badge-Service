@@ -56,16 +56,29 @@ fi
 # Fetch latest commit info
 log "Fetching latest commit for ${USER}..."
 COMMITS_DATA=$(fetch_github_data "/repos/${REPO}/commits?author=${USER}&per_page=1")
-if [[ -n "$COMMITS_DATA" ]]; then
-  LAST_COMMIT=$(echo "$COMMITS_DATA" | jq '.[0]')
-  TIMESTAMP=$(jq -r '.commit.committer.date' <<< "$LAST_COMMIT")
-  RAW_MSG=$(jq -r '.commit.message'  <<< "$LAST_COMMIT" | head -n1 | sed 's/"/\\"/g')
-  LAST_SHA=$(jq -r '.sha' <<< "$LAST_COMMIT")
 
-  UNIX_TS=$(date -d "$TIMESTAMP" +%s)
-  REL_TIME=$(curl -s "https://img.shields.io/date/${UNIX_TS}.json" | jq -r '.value')
-  MSG=$(echo "$RAW_MSG" | sed 's/(#[0-9]\+)//g' | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  COMBINED_ESC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "${REL_TIME} | ${MSG}")
+if [[ -n "$COMMITS_DATA" ]] && jq -e 'type=="array" and length>0' >/dev/null 2>&1 <<<"$COMMITS_DATA"; then
+  LAST_COMMIT=$(jq '.[0]' <<< "$COMMITS_DATA")
+
+  TIMESTAMP=$(jq -r '.commit.committer.date // empty' <<< "$LAST_COMMIT")
+  RAW_MSG=$(jq -r '.commit.message // empty' <<< "$LAST_COMMIT" | head -n1 | sed 's/"/\\"/g')
+  LAST_SHA=$(jq -r '.sha // empty' <<< "$LAST_COMMIT")
+
+  if [[ -n "$TIMESTAMP" ]]; then
+    UNIX_TS=$(date -d "$TIMESTAMP" +%s)
+    REL_TIME=$(curl -s "https://img.shields.io/date/${UNIX_TS}.json" | jq -r '.value // empty')
+
+    MSG=$(echo "$RAW_MSG" | sed 's/(#[0-9]\+)//g' | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    COMBINED_ESC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "${REL_TIME} | ${MSG}")
+  else
+    log "  • No valid commit timestamp"
+    COMBINED_ESC=""
+    LAST_SHA=""
+  fi
+else
+  log "  • No commits found for user"
+  COMBINED_ESC=""
+  LAST_SHA=""
 fi
 
 # Prepare badges
