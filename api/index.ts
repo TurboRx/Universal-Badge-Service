@@ -8,6 +8,7 @@ type BadgePayload = {
   label: string;
   message: string;
   color: string;
+  style?: string;
 };
 
 type CachedValue<T> = {
@@ -75,17 +76,19 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const [owner, repo, badgeType] = pathParts;
   const color = url.searchParams.get("color") ?? badgeColors[badgeType] ?? "0f4c81";
   const label = url.searchParams.get("label") ?? badgeType;
+  const style = url.searchParams.get("style") ?? "flat";
 
   try {
     const payload = await resolveBadgePayload(owner, repo, badgeType, label, color);
-    respondWithSvg(res, 200, buildBadge(payload));
+    respondWithSvg(res, 200, buildBadge({ ...payload, style }));
   } catch (error) {
     const apiError = toApiError(error);
     const status = apiError.status === 404 ? 404 : 500;
     respondWithSvg(res, status, buildBadge({
       label: badgeType,
       message: apiError.message,
-      color: "d73a4a"
+      color: "d73a4a",
+      style
     }));
   }
 }
@@ -251,22 +254,37 @@ function formatNumber(value: number): string {
 function buildBadge(payload: BadgePayload): string {
   const label = escapeXml(payload.label);
   const message = escapeXml(payload.message);
-  const labelWidth = Math.max(40, label.length * 6 + 14);
-  const messageWidth = Math.max(40, message.length * 6 + 14);
+  const style = (payload.style ?? "flat").toLowerCase();
+  const isForTheBadge = style === "for-the-badge";
+  const height = isForTheBadge ? 28 : 20;
+  const fontSize = isForTheBadge ? 12 : 11;
+  const textY = Math.round(height * 0.7);
+  const labelText = isForTheBadge ? label.toUpperCase() : label;
+  const messageText = isForTheBadge ? message.toUpperCase() : message;
+  const labelWidth = Math.max(40, labelText.length * 6 + 14);
+  const messageWidth = Math.max(40, messageText.length * 6 + 14);
   const totalWidth = labelWidth + messageWidth;
+  const rx = style === "flat-square" || isForTheBadge ? 0 : 3;
+  const usePlastic = style === "plastic";
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="20" role="img" aria-label="${label}: ${message}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="${height}" role="img" aria-label="${labelText}: ${messageText}">
   <linearGradient id="a" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity="0.1"/>
     <stop offset="1" stop-opacity="0.1"/>
-  </linearGradient>
-  <rect width="${labelWidth}" height="20" fill="#555"/>
-  <rect x="${labelWidth}" width="${messageWidth}" height="20" fill="#${payload.color}"/>
-  <rect width="${totalWidth}" height="20" fill="url(#a)"/>
-  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
-    <text x="${labelWidth / 2}" y="14">${label}</text>
-    <text x="${labelWidth + messageWidth / 2}" y="14">${message}</text>
+  </linearGradient>${usePlastic ? `
+  <linearGradient id="b" x2="0" y2="100%">
+    <stop offset="0" stop-color="#fff" stop-opacity="0.7"/>
+    <stop offset="0.5" stop-opacity="0.1"/>
+    <stop offset="1" stop-opacity="0"/>
+  </linearGradient>` : ""}
+  <rect width="${labelWidth}" height="${height}" fill="#555" rx="${rx}"/>
+  <rect x="${labelWidth}" width="${messageWidth}" height="${height}" fill="#${payload.color}" rx="${rx}"/>
+  <rect width="${totalWidth}" height="${height}" fill="url(#a)" rx="${rx}"/>
+${usePlastic ? `  <rect width="${totalWidth}" height="${height}" fill="url(#b)" rx="${rx}"/>` : ""}
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="${fontSize}" text-transform="${isForTheBadge ? "uppercase" : "none"}">
+    <text x="${labelWidth / 2}" y="${textY}">${labelText}</text>
+    <text x="${labelWidth + messageWidth / 2}" y="${textY}">${messageText}</text>
   </g>
 </svg>`;
 }
