@@ -8,6 +8,7 @@ type BadgePayload = {
   label: string;
   message: string;
   color: string;
+  labelColor?: string;
   style?: string;
 };
 
@@ -25,6 +26,14 @@ type RepoResponse = {
   stargazers_count: number;
   forks_count: number;
   open_issues_count: number;
+  subscribers_count?: number;
+  watchers_count?: number;
+  size?: number;
+  language?: string | null;
+  license?: {
+    spdx_id?: string;
+    name?: string;
+  } | null;
 };
 
 type CommitResponse = {
@@ -43,23 +52,63 @@ type SearchResponse = {
   total_count: number;
 };
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = new Map<string, CachedValue<unknown>>();
 
 const badgeColors: Record<string, string> = {
   stars: "ffd700",
   forks: "3cb371",
   issues: "d73a4a",
+  "open-issues": "d73a4a",
   prs: "6f42c1",
   contributors: "1f6feb",
   commits: "2da44e",
   "last-commit": "0f4c81",
-  release: "8250df"
+  release: "8250df",
+  watchers: "007ec6",
+  license: "4c1",
+  size: "97ca00",
+  language: "3178c6"
 };
+
+const CSS_NAMED_COLORS = new Set([
+  "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
+  "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse",
+  "chocolate", "coral", "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue",
+  "darkcyan", "darkgoldenrod", "darkgray", "darkgreen", "darkgrey", "darkkhaki",
+  "darkmagenta", "darkolivegreen", "darkorange", "darkorchid", "darkred", "darksalmon",
+  "darkseagreen", "darkslateblue", "darkslategray", "darkslategrey", "darkturquoise",
+  "darkviolet", "deeppink", "deepskyblue", "dimgray", "dimgrey", "dodgerblue", "firebrick",
+  "floralwhite", "forestgreen", "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod",
+  "gray", "green", "greenyellow", "grey", "honeydew", "hotpink", "indianred", "indigo",
+  "ivory", "khaki", "lavender", "lavenderblush", "lawngreen", "lemonchiffon", "lightblue",
+  "lightcoral", "lightcyan", "lightgoldenrodyellow", "lightgray", "lightgreen", "lightgrey",
+  "lightpink", "lightsalmon", "lightseagreen", "lightskyblue", "lightslategray",
+  "lightslategrey", "lightsteelblue", "lightyellow", "lime", "limegreen", "linen",
+  "magenta", "maroon", "mediumaquamarine", "mediumblue", "mediumorchid", "mediumpurple",
+  "mediumseagreen", "mediumslateblue", "mediumspringgreen", "mediumturquoise",
+  "mediumvioletred", "midnightblue", "mintcream", "mistyrose", "moccasin", "navajowhite",
+  "navy", "oldlace", "olive", "olivedrab", "orange", "orangered", "orchid", "palegoldenrod",
+  "palegreen", "paleturquoise", "palevioletred", "papayawhip", "peachpuff", "peru", "pink",
+  "plum", "powderblue", "purple", "rebeccapurple", "red", "rosybrown", "royalblue",
+  "saddlebrown", "salmon", "sandybrown", "seagreen", "seashell", "sienna", "silver",
+  "skyblue", "slateblue", "slategray", "slategrey", "snow", "springgreen", "steelblue",
+  "tan", "teal", "thistle", "tomato", "turquoise", "violet", "wheat", "white",
+  "whitesmoke", "yellow", "yellowgreen"
+]);
 
 const githubClient = createGithubClient();
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
   if (!req.url) {
     respondWithSvg(res, 400, buildBadge({ label: "badge", message: "missing url", color: "d73a4a" }));
     return;
@@ -68,19 +117,42 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
   const pathParts = url.pathname.split("/").filter(Boolean);
 
+  if (pathParts.length === 0 || url.pathname === "/" || url.pathname === "/health") {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(JSON.stringify({
+      status: "ok",
+      service: "Universal Badge Service",
+      version: "2.1.0",
+      endpoints: "/:owner/:repo/:badgeType",
+      supportedBadges: Object.keys(badgeColors)
+    }, null, 2));
+    return;
+  }
+
   if (pathParts.length !== 3) {
     respondWithSvg(res, 404, buildBadge({ label: "badge", message: "not found", color: "d73a4a" }));
     return;
   }
 
-  const [owner, repo, badgeType] = pathParts;
-  const color = url.searchParams.get("color") ?? badgeColors[badgeType] ?? "0f4c81";
+  const owner = pathParts[0];
+  const repo = pathParts[1];
+  // Strip optional .svg extension from badgeType if present
+  const rawBadgeType = pathParts[2];
+  const badgeType = rawBadgeType.replace(/\.svg$/i, "").toLowerCase();
+
+  const colorParam = url.searchParams.get("color");
+  const labelColorParam = url.searchParams.get("labelColor");
+  const color = colorParam ?? badgeColors[badgeType] ?? "0f4c81";
+  const labelColor = labelColorParam ?? "555";
   const label = url.searchParams.get("label") ?? badgeType;
   const style = url.searchParams.get("style") ?? "flat";
+  const cacheSeconds = Number.parseInt(url.searchParams.get("cacheSeconds") ?? "300", 10);
+  const maxAge = Number.isNaN(cacheSeconds) ? 300 : Math.max(0, Math.min(86400, cacheSeconds));
 
   try {
-    const payload = await resolveBadgePayload(owner, repo, badgeType, label, color);
-    respondWithSvg(res, 200, buildBadge({ ...payload, style }));
+    const payload = await resolveBadgePayload(owner, repo, badgeType, label, color, labelColor);
+    respondWithSvg(res, 200, buildBadge({ ...payload, style }), req.method === "HEAD", maxAge);
   } catch (error) {
     const apiError = toApiError(error);
     const status = apiError.status === 404 ? 404 : 500;
@@ -88,8 +160,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       label: badgeType,
       message: apiError.message,
       color: "d73a4a",
+      labelColor,
       style
-    }));
+    }), req.method === "HEAD", maxAge);
   }
 }
 
@@ -116,15 +189,16 @@ async function resolveBadgePayload(
   repo: string,
   badgeType: string,
   label: string,
-  color: string
+  color: string,
+  labelColor: string
 ): Promise<BadgePayload> {
   const key = `badge:${badgeType}:${owner}/${repo}`;
   const cached = getCacheValue<BadgePayload>(key);
   if (cached) {
-    return { ...cached, label, color };
+    return { ...cached, label, color, labelColor };
   }
 
-  const payload = await fetchBadgePayload(owner, repo, badgeType, label, color);
+  const payload = await fetchBadgePayload(owner, repo, badgeType, label, color, labelColor);
   setCacheValue(key, payload);
   return payload;
 }
@@ -134,40 +208,63 @@ async function fetchBadgePayload(
   repo: string,
   badgeType: string,
   label: string,
-  color: string
+  color: string,
+  labelColor: string
 ): Promise<BadgePayload> {
   switch (badgeType) {
     case "stars": {
       const repoData = await fetchRepo(owner, repo);
-      return { label, message: formatNumber(repoData.stargazers_count), color };
+      return { label, message: formatNumber(repoData.stargazers_count), color, labelColor };
     }
     case "forks": {
       const repoData = await fetchRepo(owner, repo);
-      return { label, message: formatNumber(repoData.forks_count), color };
+      return { label, message: formatNumber(repoData.forks_count), color, labelColor };
     }
     case "issues": {
       const count = await fetchSearchCount(`${owner}/${repo}`, "issue", "open");
-      return { label, message: formatNumber(count), color };
+      return { label, message: formatNumber(count), color, labelColor };
+    }
+    case "open-issues": {
+      const repoData = await fetchRepo(owner, repo);
+      return { label, message: formatNumber(repoData.open_issues_count), color, labelColor };
+    }
+    case "watchers": {
+      const repoData = await fetchRepo(owner, repo);
+      const watchers = repoData.subscribers_count ?? repoData.watchers_count ?? 0;
+      return { label, message: formatNumber(watchers), color, labelColor };
+    }
+    case "license": {
+      const repoData = await fetchRepo(owner, repo);
+      const lic = repoData.license?.spdx_id ?? repoData.license?.name ?? "No License";
+      return { label, message: lic, color, labelColor };
+    }
+    case "size": {
+      const repoData = await fetchRepo(owner, repo);
+      return { label, message: formatSize(repoData.size ?? 0), color, labelColor };
+    }
+    case "language": {
+      const repoData = await fetchRepo(owner, repo);
+      return { label, message: repoData.language ?? "None", color, labelColor };
     }
     case "prs": {
       const count = await fetchSearchCount(`${owner}/${repo}`, "pr", "open");
-      return { label, message: formatNumber(count), color };
+      return { label, message: formatNumber(count), color, labelColor };
     }
     case "contributors": {
       const count = await fetchPagedCount(`/repos/${owner}/${repo}/contributors?per_page=1&anon=1`);
-      return { label, message: formatNumber(count), color };
+      return { label, message: formatNumber(count), color, labelColor };
     }
     case "commits": {
       const count = await fetchPagedCount(`/repos/${owner}/${repo}/commits?per_page=1`);
-      return { label, message: formatNumber(count), color };
+      return { label, message: formatNumber(count), color, labelColor };
     }
     case "last-commit": {
       const date = await fetchLastCommitDate(owner, repo);
-      return { label, message: date, color };
+      return { label, message: date, color, labelColor };
     }
     case "release": {
       const tag = await fetchLatestRelease(owner, repo);
-      return { label, message: tag, color };
+      return { label, message: tag, color, labelColor };
     }
     default:
       throw { status: 404, message: "unknown badge" } satisfies ApiError;
@@ -251,24 +348,56 @@ function formatNumber(value: number): string {
   return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
 }
 
-function buildBadge(payload: BadgePayload): string {
+function formatSize(kb: number): string {
+  if (kb < 1024) {
+    return `${kb} KB`;
+  }
+  if (kb < 1024 * 1024) {
+    return `${(kb / 1024).toFixed(1).replace(/\.0$/, "")} MB`;
+  }
+  return `${(kb / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} GB`;
+}
+
+export function normalizeColor(input: string, defaultColor: string = "555"): string {
+  if (!input) return `#${defaultColor.replace(/^#/, "")}`;
+  const clean = input.trim().toLowerCase();
+  
+  if (CSS_NAMED_COLORS.has(clean)) {
+    return clean;
+  }
+
+  const hexClean = clean.replace(/^#/, "");
+  if (/^[0-9a-f]{3,8}$/i.test(hexClean)) {
+    return `#${hexClean}`;
+  }
+
+  return `#${defaultColor.replace(/^#/, "")}`;
+}
+
+export function buildBadge(payload: BadgePayload): string {
   const label = escapeXml(payload.label);
   const message = escapeXml(payload.message);
   const style = (payload.style ?? "flat").toLowerCase();
   const isForTheBadge = style === "for-the-badge";
   const height = isForTheBadge ? 28 : 20;
   const fontSize = isForTheBadge ? 12 : 11;
-  const textY = Math.round(height * 0.7);
+  const textY = isForTheBadge ? 19 : 14;
   const labelText = isForTheBadge ? label.toUpperCase() : label;
   const messageText = isForTheBadge ? message.toUpperCase() : message;
-  const labelWidth = Math.max(40, labelText.length * 6 + 14);
-  const messageWidth = Math.max(40, messageText.length * 6 + 14);
+  const labelWidth = Math.max(35, labelText.length * 6.5 + 14);
+  const messageWidth = Math.max(35, messageText.length * 6.5 + 14);
   const totalWidth = labelWidth + messageWidth;
   const rx = style === "flat-square" || isForTheBadge ? 0 : 3;
   const usePlastic = style === "plastic";
 
+  const msgColor = normalizeColor(payload.color, "0f4c81");
+  const lblColor = normalizeColor(payload.labelColor ?? "555", "555");
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="${height}" role="img" aria-label="${labelText}: ${messageText}">
+  <clipPath id="r">
+    <rect width="${totalWidth}" height="${height}" rx="${rx}"/>
+  </clipPath>
   <linearGradient id="a" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity="0.1"/>
     <stop offset="1" stop-opacity="0.1"/>
@@ -278,11 +407,13 @@ function buildBadge(payload: BadgePayload): string {
     <stop offset="0.5" stop-opacity="0.1"/>
     <stop offset="1" stop-opacity="0"/>
   </linearGradient>` : ""}
-  <rect width="${labelWidth}" height="${height}" fill="#555" rx="${rx}"/>
-  <rect x="${labelWidth}" width="${messageWidth}" height="${height}" fill="#${payload.color}" rx="${rx}"/>
-  <rect width="${totalWidth}" height="${height}" fill="url(#a)" rx="${rx}"/>
-${usePlastic ? `  <rect width="${totalWidth}" height="${height}" fill="url(#b)" rx="${rx}"/>` : ""}
-  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="${fontSize}" text-transform="${isForTheBadge ? "uppercase" : "none"}">
+  <g clip-path="url(#r)">
+    <rect width="${labelWidth}" height="${height}" fill="${lblColor}"/>
+    <rect x="${labelWidth}" width="${messageWidth}" height="${height}" fill="${msgColor}"/>
+    <rect width="${totalWidth}" height="${height}" fill="url(#a)"/>
+${usePlastic ? `    <rect width="${totalWidth}" height="${height}" fill="url(#b)"/>` : ""}
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="${fontSize}">
     <text x="${labelWidth / 2}" y="${textY}">${labelText}</text>
     <text x="${labelWidth + messageWidth / 2}" y="${textY}">${messageText}</text>
   </g>
@@ -313,14 +444,25 @@ function getCacheValue<T>(key: string): T | null {
 }
 
 function setCacheValue<T>(key: string, value: T): void {
-  cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+  cache.set(key, { value, expiresAt: Date.now() + DEFAULT_CACHE_TTL_MS });
 }
 
-function respondWithSvg(res: ServerResponse, status: number, svg: string): void {
+function respondWithSvg(
+  res: ServerResponse,
+  status: number,
+  svg: string,
+  isHead: boolean = false,
+  maxAge: number = 300
+): void {
   res.statusCode = status;
   res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
-  res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
-  res.end(svg);
+  res.setHeader("Cache-Control", `public, max-age=${maxAge}, s-maxage=${maxAge}`);
+  if (isHead) {
+    res.setHeader("Content-Length", Buffer.byteLength(svg));
+    res.end();
+  } else {
+    res.end(svg);
+  }
 }
 
 function toApiError(error: unknown): ApiError {
@@ -345,3 +487,4 @@ if (isMain) {
     process.stdout.write(`badge service listening on ${port}\n`);
   });
 }
+
